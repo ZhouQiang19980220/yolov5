@@ -23,6 +23,9 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
+import random
+import time
+from typing import List
 
 # Import 'ultralytics' package or install if if missing
 try:
@@ -177,6 +180,64 @@ class C3(nn.Module):
 
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+def random_sample_9_from_25(seed = None):
+    """
+    从25个数中随机选择9个
+    """
+    if seed is None:
+        # 将随机数种子设置当前的时间
+        seed = int(time.time())
+    random.seed(seed)
+
+    numbers = list(range(25))
+    random_numbers = random.sample(numbers, 9)
+    if 12 not in random_numbers:
+        random_numbers[0] = 12
+    return random_numbers
+
+def get_mask_from_1d_index(_1d_indexs: List[int]):
+    mask = np.zeros((5, 5), dtype=int)  # 创建一个初始为0的5x5掩码
+
+    for number in _1d_indexs:
+        assert 12 in _1d_indexs
+        row = number // 5  # 计算行索引
+        col = number % 5  # 计算列索引
+        mask[row, col] = 1  # 将对应位置上的元素设为1
+    assert mask[2, 2] == 1
+    mask = torch.from_numpy(mask)
+    return mask
+
+def get_random_mask(seed):
+    return get_mask_from_1d_index(random_sample_9_from_25(seed))
+
+class Mask5x5Conv2d(nn.Conv2d):
+    def __init__(self, in_channels: int, bias: bool = True) -> None:
+        super().__init__(in_channels, in_channels, kernel_size=5, stride=1, padding=2, dilation=1, groups=in_channels, bias=bias)
+        # self.weight.data.shape = (in_channels, 1, 5, 5)
+        nn.init.kaiming_normal_(self.weight)
+
+        masks = []
+        for i in range(in_channels):
+            masks.append(get_random_mask(seed=torch.sum(self.weight.data)))
+        masks = torch.stack(masks, dim = 0)
+        masks = masks.view(in_channels, 1, 5, 5)
+        self.masks = masks
+
+    def forward(self, x):
+        self.weight.data = torch.mul(self.weight.data, self.masks.to(x.device))
+        return super().forward(x)
+    
+
+class SpraseC3(C3):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.mask_conv = Mask5x5Conv2d(c1)
+
+    def forward(self, x):
+        branch1 = self.m.self.cv1(x)
+        branch2 = self.mask_conv(self.cv2(x))
+        return self.cv3(torch.cat(branch1, branch2, 1))
 
 
 class C3x(C3):
