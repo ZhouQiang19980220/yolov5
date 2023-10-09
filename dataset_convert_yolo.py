@@ -1,11 +1,11 @@
 from os import path, makedirs
 import shutil
 
-sourcr_images_dir = 'datasets/SAR-AIRcraft-1.0/JPEGImages'
-txt_files_dir = 'datasets/SAR-AIRcraft-1.0/ImageSets/Main'
+sourcr_images_dir = '../datasets/SAR-AIRcraft-1.0/JPEGImages'
+txt_files_dir = '../datasets/SAR-AIRcraft-1.0/ImageSets/Main'
 txt_files = ['test.txt', 'train.txt', 'val.txt']
 
-target_dir = 'datasets/SAR-AIRcraft-1.0-yolo'
+target_dir = '../datasets/SAR-AIRcraft-1.0-yolo'
 img_extension = '.jpg'
 label_extension = '.txt'
 
