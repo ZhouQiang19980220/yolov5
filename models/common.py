@@ -235,9 +235,9 @@ class SpraseC3(C3):
         self.mask_conv = Mask5x5Conv2d(c1)
 
     def forward(self, x):
-        branch1 = self.m.self.cv1(x)
-        branch2 = self.mask_conv(self.cv2(x))
-        return self.cv3(torch.cat(branch1, branch2, 1))
+        branch1 = self.m(self.cv1(x))
+        branch2 = self.cv2(self.mask_conv(x))
+        return self.cv3(torch.cat((branch1, branch2), 1))
 
 
 class C3x(C3):
