@@ -26,6 +26,7 @@ from torch.cuda import amp
 import random
 import time
 from typing import List
+from torch.nn import functional as F
 
 # Import 'ultralytics' package or install if if missing
 try:
@@ -88,7 +89,7 @@ class DWConvTranspose2d(nn.ConvTranspose2d):
 
 class TransformerLayer(nn.Module):
     # Transformer layer https://arxiv.org/abs/2010.11929 (LayerNorm layers removed for better performance)
-    def __init__(self, c, num_heads):
+    def __init__(self, c, num_heads): 
         super().__init__()
         self.q = nn.Linear(c, c, bias=False)
         self.k = nn.Linear(c, c, bias=False)
@@ -229,7 +230,7 @@ class Mask5x5Conv2d(nn.Conv2d):
         return super().forward(x)
     
 
-class SpraseC3(C3):
+class SparseC3(C3):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.mask_conv = Mask5x5Conv2d(c1)
@@ -383,6 +384,13 @@ class Concat(nn.Module):
 
     def forward(self, x):
         return torch.cat(x, self.d)
+    
+class Add(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.add(*x)
 
 
 class DetectMultiBackend(nn.Module):
@@ -942,3 +950,147 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+class MultLayerPatchEmbedding(nn.Module):
+    """
+    接受三个layer的输入，输入尺寸分别是
+    level1: [B, C, 4W, 4H]   16CHW
+    level2: [B, 2C, 2H, 2W]  8CHW
+    level3: [B, 4C, H, W]     4CHW
+    """
+    def __init__(self, channel) -> None:
+        super().__init__()
+        self.channel = channel
+
+        # 通道缩小4倍，空间扩充4倍
+        self.conv1 = nn.ConvTranspose2d(2 * channel, channel//2, kernel_size=2, stride=2)
+        # 通道缩小16倍，空间扩充16倍
+        self.conv2 = nn.ConvTranspose2d(4 * channel, channel//4, kernel_size=4, stride=4)
+
+    def forward(self, levels):
+        levels[1] = self.conv1(levels[1])
+        levels[2] = self.conv2(levels[2])
+        return torch.concat(levels, dim=1)
+    
+class ReversedMultLayerPatchEmbedding(nn.Module):
+    """
+    接受一个448, 80, 80的特征图
+    输出三个特征图，分别是
+    256, 80, 80
+    512, 40, 40
+    1024, 20, 20
+    """
+    def __init__(self, channel: int, idx: int):
+        super().__init__()
+        self.base_channel = base_channel = int(channel / 7)     # 
+        self.idx = idx
+        if idx == 1:
+            # 通道扩充4倍，空间收缩2倍
+            self.conv1 = nn.Conv2d(base_channel * 2, base_channel * 8, kernel_size=2, stride=2)
+        elif idx == 2:
+            # 通道扩充16倍，空间收缩4倍
+            self.conv2 = nn.Conv2d(base_channel, base_channel * 16, kernel_size=4, stride=4)
+
+    def forward(self, features):
+        if self.idx == 0:
+            first_map = features[:, :self.base_channel*4, :, :]
+            return first_map
+        elif self.idx == 1:
+            second_map = features[:, self.base_channel*4:self.base_channel*6, :, :]
+            second_map = self.conv1(second_map)
+            return second_map
+        elif self.idx == 2:
+            third_map = features[:, self.base_channel*6:, :, :]
+            third_map = self.conv2(third_map)
+            return third_map
+        else:
+            ValueError
+    
+class MultLayerTransformerFusion(nn.Module):
+    """
+    接受三个layer的输入，输入尺寸分别是
+    level1: [B, C, 4W, 4H]   16CHW
+    level2: [B, 2C, 2H, 2W]  8CHW
+    level3: [B, 4C, H, W]     4CHW
+    """
+    def __init__(self, channel, num_heads, num_layers) -> None:
+        super().__init__()
+        self.channel = channel
+
+        self.multLayerPatchEmbedding = MultLayerPatchEmbedding(channel)
+        tf_channel = int(channel * 7 / 4)
+        self.transformerBlock = TransformerBlock(tf_channel, tf_channel, num_heads, num_layers)
+
+    def forward(self, levels):
+        feature = self.multLayerPatchEmbedding(levels)
+        feature = self.transformerBlock(feature)
+        return feature
+    
+
+class SplitChannel(nn.Module):
+    def __init__(self, in_channel, out_channel, start: float) -> None:
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.start_idx = int(start * in_channel)
+        self.stop_idx = self.start_idx + self.out_channel
+
+        if self.stop_idx > in_channel:
+            self.conv = nn.Conv2d(in_channels=in_channel-self.start_idx, out_channels=self.out_channel, kernel_size=1)
+        else:
+            self.conv = None
+    def forward(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        assert C == self.in_channel
+        out = x[:, self.start_idx: self.stop_idx, :, :]
+
+        if self.conv is not None:
+            out = self.conv(out)
+
+        return out
+
+
+class TruncatedLoss(nn.Module):
+
+    def __init__(self, q=0.7, k=0.5, trainset_size=50000):
+        super(TruncatedLoss, self).__init__()
+        self.q = q
+        self.k = k
+        self.weight = torch.nn.Parameter(data=torch.ones(trainset_size, 1), requires_grad=False)
+             
+    def forward(self, logits, targets, indexes=0):
+        p = F.softmax(logits, dim=1)
+        Yg = torch.gather(p, 1, torch.unsqueeze(targets, 1))
+
+        loss = ((1-(Yg**self.q))/self.q)*self.weight[indexes] - ((1-(self.k**self.q))/self.q)*self.weight[indexes]
+        loss = torch.mean(loss)
+
+        return loss
+
+    def update_weight(self, logits, targets, indexes):
+        p = F.softmax(logits, dim=1)
+        Yg = torch.gather(p, 1, torch.unsqueeze(targets, 1))
+        Lq = ((1-(Yg**self.q))/self.q)
+        Lqk = np.repeat(((1-(self.k**self.q))/self.q), targets.size(0))
+        Lqk = torch.from_numpy(Lqk).type(torch.cuda.FloatTensor)
+        Lqk = torch.unsqueeze(Lqk, 1)
+        
+
+        condition = torch.gt(Lqk, Lq)
+        self.weight[indexes] = condition.type(torch.cuda.FloatTensor)
+
+class TruncatedLoss(nn.Module):
+
+    def __init__(self, q=0.5, k=0.5):
+        super(TruncatedLoss, self).__init__()
+        self.q = q
+        self.k = k
+             
+    def forward(self, logits, targets):
+        p = F.softmax(logits, dim=1)
+        Yg = torch.gather(p, 1, torch.unsqueeze(targets, 1))
+
+        loss = ((1-(Yg**self.q))/self.q) - ((1-(self.k**self.q))/self.q)
+        loss = torch.mean(loss)
+
+        return loss
