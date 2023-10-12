@@ -316,7 +316,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
                 Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
-                BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, SpraseC3}:
+                BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, SparseC3, TransformerBlock, SplitChannel}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
@@ -340,6 +340,24 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:
             c2 = ch[f] // args[0] ** 2
+        elif m is MultLayerTransformerFusion:
+            c1 = ch[f[0]]
+            c2 = int(c1 * 7 / 4)
+            args = [c1] + args
+        elif m is ReversedMultLayerPatchEmbedding:
+            c1 = ch[f]
+            args = [c1] + args
+            base_channel = int(args[0] / 7)
+            if args[1] == 0:
+                c2 = base_channel * 4
+            elif args[1] == 1:
+                c2 = base_channel * 8
+            elif args[1] == 2:
+                c2 = base_channel * 16
+        elif m is nn.AvgPool2d:
+            c2 = ch[f]
+        elif m is Add:
+            c2 = ch[f[0]]
         else:
             c2 = ch[f]
 
