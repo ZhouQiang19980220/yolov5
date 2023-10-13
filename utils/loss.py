@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
+from torch.nn import functional as F
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
@@ -17,20 +18,38 @@ def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#iss
 
 class BCEBlurWithLogitsLoss(nn.Module):
     # BCEwithLogitLoss() with reduced missing label effects.
-    def __init__(self, alpha=0.05):
+    def __init__(self, alpha=0.05, pos_weight = None):
         super().__init__()
-        self.loss_fcn = nn.BCEWithLogitsLoss(reduction='none')  # must be nn.BCEWithLogitsLoss()
+        self.loss_fcn = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)  # must be nn.BCEWithLogitsLoss()
         self.alpha = alpha
 
     def forward(self, pred, true):
         loss = self.loss_fcn(pred, true)
         pred = torch.sigmoid(pred)  # prob from logits
-        dx = pred - true  # reduce only missing label effects
-        # dx = (pred - true).abs()  # reduce missing label and false label effects
+        # dx = pred - true  # reduce only missing label effects
+        dx = (pred - true).abs()  # reduce missing label and false label effects
         alpha_factor = 1 - torch.exp((dx - 1) / (self.alpha + 1e-4))
         loss *= alpha_factor
         return loss.mean()
+    
+class GCELosswithLogits(torch.nn.Module):
+    def __init__(self, alpha = 0.7, pos_weight=1, reduction='mean', eps = 1e-7):
+        super(GCELosswithLogits, self).__init__()
+        self.pos_weight = pos_weight
+        self.reduction = reduction
+        self.alpha = alpha + eps
 
+    def forward(self, logits, target):
+         # logits: [N, *], target: [N, *]
+        logits = F.sigmoid(logits)
+        loss = self.pos_weight * target * (1-torch.pow(logits, self.alpha)) + (1 - target) * (1-torch.pow(1-logits, self.alpha)) 
+        loss = loss / (self.alpha)
+        if self.reduction == 'mean':
+            loss = loss.mean()
+        elif self.reduction == 'sum':
+            loss = loss.sum()
+        return loss
+    
 
 class FocalLoss(nn.Module):
     # Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)
@@ -97,8 +116,12 @@ class ComputeLoss:
         h = model.hyp  # hyperparameters
 
         # Define criteria
-        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
-        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        # BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
+        # BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        BCEcls = BCEBlurWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
+        BCEobj = BCEBlurWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        # if h['gce_alpha'] > -0.01:
+        #     BCEobj = GCELosswithLogits(alpha=h['gce_alpha'], pos_weight=torch.tensor([h['obj_pw']], device=device))
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
