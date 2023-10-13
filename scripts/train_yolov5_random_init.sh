@@ -3,6 +3,7 @@
 python train.py --img 640 --epochs 200 --data SARAIRcraft1.0.yaml --weights '' --cache ram --cfg yolov5s.yaml --project runs/train/yolov5_baseline_随机初始化
 
 python train.py --img 640 --epochs 200 --data SARAIRcraft1.0.yaml --weights '' --cache ram --cfg yolov5s_sparse_conv_transformer_neck.yaml 
+ python train.py --img 640 --epochs 200 --data SARAIRcraft1.0.yaml --weights runs/train/yolov5_sparse_conv/exp3/weights/last.pt --cache ram --cfg yolov5s_sparse_conv.yaml --project runs/train/yolov5_sparse_conv --resume runs/train/yolov5_sparse_conv/exp3/weights/last.pt
 
 python train.py --img 640 --epochs 200 --data SARAIRcraft1.0.yaml --weights '' --cache ram --cfg yolov5s_sparse_conv.yaml --project runs/train/yolov5_sparse_conv
 
